@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="シフト管理">
+<title>シフト管理</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,sans-serif;background:#f2f2f7;min-height:100vh;}
+header{background:#fff;padding:12px 16px;border-bottom:0.5px solid #ddd;position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;}
+.month-nav{display:flex;align-items:center;gap:8px;}
+.month-nav button{background:none;border:none;font-size:20px;color:#007aff;padding:0 4px;cursor:pointer;}
+.month-nav span{font-size:15px;font-weight:500;min-width:80px;text-align:center;}
+.btn{padding:7px 14px;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:500;}
+.btn-primary{background:#007aff;color:#fff;}
+.btn-green{background:#34c759;color:#fff;}
+.btn-gray{background:#e5e5ea;color:#333;}
+.login-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:80vh;gap:16px;padding:24px;}
+.login-screen h2{font-size:20px;font-weight:600;}
+.login-screen p{color:#666;font-size:14px;text-align:center;}
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;padding:0 0 80px;}
+table{border-collapse:collapse;min-width:100%;}
+th,td{border:0.5px solid #ddd;text-align:center;font-size:11px;white-space:nowrap;}
+th{background:#f8f8f8;height:32px;padding:0 4px;}
+th.name-col{background:#f0f0f0;}
+td.name-col{background:#fff;font-weight:500;padding:0 8px;font-size:12px;}
+td.shift-cell{height:38px;width:32px;cursor:pointer;user-select:none;-webkit-user-select:none;}
+td.day{background:#fff;}
+td.night{background:#dbeafe;}
+td.off{background:#fce7f3;}
+td.after{background:#f0fdf4;font-size:9px;color:#888;}
+td.holiday-col{background:#fff8e1;}
+th.holiday-col{background:#fff3cd;}
+td.warn{background:#ffe5e5!important;}
+td.count-col{background:#f8f8f8;font-weight:600;font-size:12px;padding:0 6px;}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:200;}
+.modal{background:#fff;border-radius:16px;padding:20px;width:90%;max-width:340px;}
+.modal h3{font-size:16px;font-weight:600;margin-bottom:12px;}
+.staff-item{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:0.5px solid #eee;font-size:14px;}
+.staff-item:last-child{border-bottom:none;}
+.del-btn{background:none;border:none;color:#ff3b30;font-size:20px;cursor:pointer;padding:0 4px;}
+.loading{text-align:center;padding:40px;color:#999;font-size:14px;}
+.badge{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500;}
+.badge-manager{background:#dbeafe;color:#1d4ed8;}
+.badge-staff{background:#dcfce7;color:#166534;}
+.offline-banner{background:#ff9500;color:#fff;text-align:center;padding:6px;font-size:12px;font-weight:500;display:none;}
+.offline-banner.show{display:block;}
+.sync-banner{background:#34c759;color:#fff;text-align:center;padding:6px;font-size:12px;font-weight:500;display:none;}
+.sync-banner.show{display:block;}
+</style>
+</head>
+<body>
+<div class="offline-banner" id="offlineBanner">📵 オフライン中 - 変更は次回オンライン時に同期されます</div>
+<div class="sync-banner" id="syncBanner">✅ オンラインに復帰 - データを同期しました</div>
+<div id="app"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDwKr8ntVZ-C-Z6lo6LpFZr0UJulYwURKs",
+  authDomain: "shift-app-9658d.firebaseapp.com",
+  projectId: "shift-app-9658d",
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+enableIndexedDbPersistence(db).catch(err => console.log("永続化:", err.code));
+
+window.addEventListener("offline", () => {
+  document.getElementById("offlineBanner").classList.add("show");
+});
+window.addEventListener("online", async () => {
+  document.getElementById("offlineBanner").classList.remove("show");
+  const b = document.getElementById("syncBanner");
+  b.classList.add("show");
+  setTimeout(() => b.classList.remove("show"), 3000);
+});
+if (!navigator.onLine) document.getElementById("offlineBanner").classList.add("show");
+
+let user = null;
+let wardId = null;
+let staff = [];
+let shifts = {};
+let currentDate = new Date();
+
+function saveLocal() {
+  localStorage.setItem("shifts_backup", JSON.stringify(shifts));
+  localStorage.setItem("staff_backup", JSON.stringify(staff));
+  if (wardId) localStorage.setItem("wardId_backup", wardId);
+  if (user) localStorage.setItem("user_backup", JSON.stringify(user));
+}
+
+function loadLocal() {
+  const s = localStorage.getItem("shifts_backup");
+  const st = localStorage.getItem("staff_backup");
+  if (s) shifts = JSON.parse(s);
+  if (st) staff = JSON.parse(st);
+}
+
+function getWardId() {
+  let w = new URLSearchParams(location.search).get("ward");
+  if (!w) {
+    w = localStorage.getItem("wardId_backup") || crypto.randomUUID();
+    history.replaceState(null, "", "?ward=" + w);
+  }
+  return w;
+}
+
+async function loadData() {
+  try {
+    const snap = await getDoc(doc(db, "wards", wardId));
+    if (snap.exists()) {
+      shifts = snap.data().shifts || {};
+      staff = snap.data().staff || [];
+      saveLocal();
+    } else { loadLocal(); }
+  } catch (e) { loadLocal(); }
+}
+
+async function saveData() {
+  saveLocal();
+  try {
+    await setDoc(doc(db, "wards", wardId), { shifts, staff }, { merge: true });
+  } catch (e) { console.log("オフライン保存"); }
+}
+
+function canEdit(name) {
+  return user?.role === "manager" || user?.name === name;
+}
+
+async function getHolidays(year) {
+  const key = "holidays_" + year;
+  const cached = localStorage.getItem(key);
+  if (cached) return JSON.parse(cached);
+  try {
+    const r = await fetch(`https://holidays-jp.github.io/api/v1/${year}/date.json`);
+    const data = await r.json();
+    localStorage.setItem(key, JSON.stringify(data));
+    return data;
+  } catch { return {}; }
+}
+
+function isOverWork(name, d) {
+  let c = 0;
+  for (let i = d - 5; i <= d; i++) {
+    if ((shifts[name]?.[i] || "") && shifts[name][i] !== "休") c++;
+  }
+  return c >= 6;
+}
+
+function toggle(name, d) {
+  if (!canEdit(name)) return;
+  if (!shifts[name]) shifts[name] = [];
+  const order = ["", "日", "夜", "休"];
+  const cur = shifts[name][d] || "";
+  if (cur === "" && isOverWork(name, d)) { alert("6連勤になります"); return; }
+  const next = order[(order.indexOf(cur) + 1) % 4];
+  shifts[name][d] = next;
+  if (next === "夜") shifts[name][d + 1] = "/";
+  else if (cur === "夜" && shifts[name][d + 1] === "/") shifts[name][d + 1] = "";
+  saveData();
+  renderTable();
+}
+
+function generateShift() {
+  const y = currentDate.getFullYear();
+  const m = currentDate.getMonth();
+  const days = new Date(y, m + 1, 0).getDate();
+  staff.forEach(name => {
+    shifts[name] = Array(days).fill("");
+    for (let d = 0; d < days; d++) {
+      if (shifts[name][d] === "/") continue;
+      const r = Math.random();
+      if (r < 0.15) { shifts[name][d] = "休"; }
+      else if (r < 0.3 && d < days - 1) { shifts[name][d] = "夜"; shifts[name][d + 1] = "/"; }
+      else { shifts[name][d] = "日"; }
+    }
+  });
+  saveData();
+  renderTable();
+}
+
+async function renderTable() {
+  const y = currentDate.getFullYear();
+  const m = currentDate.getMonth();
+  const days = new Date(y, m + 1, 0).getDate();
+  const holidays = await getHolidays(y);
+
+  let html = "<div class='table-wrap'><table><thead><tr>";
+  html += `<th class='name-col'>名前</th>`;
+  for (let d = 1; d <= days; d++) {
+    const date = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const dow = new Date(y, m, d).getDay();
+    const isHol = holidays[date] || dow === 0 || dow === 6;
+    html += `<th class='${isHol ? "holiday-col" : ""}'>${d}<br><span style='font-size:9px;color:#999'>${["日","月","火","水","木","金","土"][dow]}</span></th>`;
+  }
+  html += "<th>回数</th></tr></thead><tbody>";
+
+  staff.forEach(name => {
+    html += `<tr><td class='name-col'>${name}${name === user?.name ? `<br><span class='badge badge-${user.role === "manager" ? "manager" : "staff"}'>${user.role === "manager" ? "師長" : "スタッフ"}</span>` : ""}</td>`;
+    let count = 0;
+    for (let d = 0; d < days; d++) {
+      const v = shifts[name]?.[d] || "";
+      let cls = "shift-cell";
+      if (v === "日") cls += " day";
+      else if (v === "夜") cls += " night";
+      else if (v === "休") cls += " off";
+      else if (v === "/") cls += " after";
+      if (v && v !== "休" && v !== "/") count++;
+      const date = `${y}-${String(m + 1).padStart(2, "0")}-${String(d + 1).padStart(2, "0")}`;
+      const dow = new Date(y, m, d + 1).getDay();
+      const isHol = holidays[date] || dow === 0 || dow === 6;
+      if (isHol && !v) cls += " holiday-col";
+      if (isOverWork(name, d) && v && v !== "休") cls += " warn";
+      const locked = !canEdit(name) ? "pointer-events:none;opacity:0.5" : "";
+      html += `<td class='${cls}' style='${locked}' onclick="window._toggle('${name}',${d})">${v}</td>`;
+    }
+    html += `<td class='count-col'>${count}</td></tr>`;
+  });
+
+  html += "</tbody></table></div>";
+  document.getElementById("tableArea").innerHTML = html;
+}
+
+function renderStaffModal() {
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `
+  <div class='modal'>
+    <h3>スタッフ管理</h3>
+    <div id='staffList'>${staff.map(n => `<div class='staff-item'><span>${n}</span><button class='del-btn' onclick="window._removeStaff('${n}')">×</button></div>`).join("")}</div>
+    <div style='display:flex;gap:8px;margin-top:14px;'>
+      <input id='newStaffName' placeholder='名前を入力' style='flex:1;padding:8px;border:0.5px solid #ddd;border-radius:8px;font-size:14px;'>
+      <button class='btn btn-primary' onclick="window._addStaff()">追加</button>
+    </div>
+    <button class='btn btn-gray' style='width:100%;margin-top:12px;' onclick="this.closest('.modal-bg').remove()">閉じる</button>
+  </div>`;
+  document.body.appendChild(bg);
+}
+
+window._toggle = (n, d) => toggle(n, d);
+window._addStaff = () => {
+  const inp = document.getElementById("newStaffName");
+  const name = inp.value.trim();
+  if (!name || staff.includes(name)) return;
+  staff.push(name); saveData(); inp.value = "";
+  document.getElementById("staffList").innerHTML = staff.map(n => `<div class='staff-item'><span>${n}</span><button class='del-btn' onclick="window._removeStaff('${n}')">×</button></div>`).join("");
+  renderTable();
+};
+window._removeStaff = (name) => {
+  if (!confirm(`${name}を削除しますか？`)) return;
+  staff = staff.filter(n => n !== name); delete shifts[name]; saveData();
+  document.getElementById("staffList").innerHTML = staff.map(n => `<div class='staff-item'><span>${n}</span><button class='del-btn' onclick="window._removeStaff('${n}')">×</button></div>`).join("");
+  renderTable();
+};
+
+function renderApp() {
+  document.getElementById("app").innerHTML = `
+  <header>
+    <div class='month-nav'>
+      <button onclick="window._prevMonth()">‹</button>
+      <span id='monthLabel'></span>
+      <button onclick="window._nextMonth()">›</button>
+    </div>
+    <div style='display:flex;gap:8px;'>
+      ${user?.role === "manager" ? `<button class='btn btn-gray' onclick="window._openStaff()">スタッフ</button><button class='btn btn-green' onclick="window._generate()">AI生成</button>` : ""}
+    </div>
+  </header>
+  <div id='tableArea'><div class='loading'>読み込み中...</div></div>`;
+  updateMonthLabel();
+  renderTable();
+}
+
+function updateMonthLabel() {
+  const el = document.getElementById("monthLabel");
+  if (el) el.textContent = `${currentDate.getFullYear()}/${currentDate.getMonth() + 1}`;
+}
+
+window._prevMonth = () => { currentDate.setMonth(currentDate.getMonth() - 1); updateMonthLabel(); renderTable(); };
+window._nextMonth = () => { currentDate.setMonth(currentDate.getMonth() + 1); updateMonthLabel(); renderTable(); };
+window._generate = () => { if (confirm("今月のシフトをAI生成しますか？")) generateShift(); };
+window._openStaff = () => renderStaffModal();
+
+function renderLogin() {
+  document.getElementById("app").innerHTML = `
+  <div class='login-screen'>
+    <div style='font-size:48px;'>📅</div>
+    <h2>シフト管理</h2>
+    <p>Googleアカウントでログインしてください</p>
+    <button class='btn btn-primary' style='padding:12px 32px;font-size:16px;' onclick="window._login()">Googleでログイン</button>
+  </div>`;
+}
+
+window._login = async () => {
+  try {
+    const result = await signInWithPopup(auth, new GoogleAuthProvider());
+    const uid = result.user.uid;
+    const ref = doc(db, "users", uid);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      const name = prompt("あなたの名前を入力してください");
+      if (!name) return;
+      const isManager = confirm("師長（管理者）ですか？\nOK→師長　キャンセル→スタッフ");
+      await setDoc(ref, { name, role: isManager ? "manager" : "staff" });
+      user = { uid, name, role: isManager ? "manager" : "staff" };
+    } else {
+      user = { uid, ...snap.data() };
+    }
+    wardId = getWardId();
+    await loadData();
+    saveLocal();
+    renderApp();
+  } catch (e) { alert("ログインに失敗しました: " + e.message); }
+};
+
+onAuthStateChanged(auth, async (u) => {
+  if (u) {
+    try {
+      const snap = await getDoc(doc(db, "users", u.uid));
+      if (snap.exists()) {
+        user = { uid: u.uid, ...snap.data() };
+        wardId = getWardId();
+        await loadData();
+        saveLocal();
+        renderApp();
+      } else { renderLogin(); }
+    } catch (e) {
+      const savedUser = localStorage.getItem("user_backup");
+      if (savedUser) {
+        user = JSON.parse(savedUser);
+        wardId = getWardId();
+        loadLocal();
+        renderApp();
+      } else { renderLogin(); }
+    }
+  } else { renderLogin(); }
+});
+</script>
+
+<script>
+if ("serviceWorker" in navigator) {
+  const swCode = `
+    const CACHE = "shift-v2";
+    self.addEventListener("install", e => {
+      e.waitUntil(caches.open(CACHE).then(c => c.addAll(["./shift-manager.html"])));
+      self.skipWaiting();
+    });
+    self.addEventListener("activate", e => {
+      e.waitUntil(caches.keys().then(keys =>
+        Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      ));
+    });
+    self.addEventListener("fetch", e => {
+      e.respondWith(
+        fetch(e.request).then(res => {
+          if (res.ok) {
+            const clone = res.clone();
+            caches.open(CACHE).then(c => c.put(e.request, clone));
+          }
+          return res;
+        }).catch(() => caches.match(e.request).then(r => r || caches.match("./shift-manager.html")))
+      );
+    });
+  `;
+  const blob = new Blob([swCode], { type: "application/javascript" });
+  navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(e => console.log("SW:", e));
+}
+</script>
+</body>
+</html>
